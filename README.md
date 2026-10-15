@@ -29,3 +29,9 @@ Notes:
 ## Run it on your own computer for testing
 `node relay.js` (port 8080, or set `PORT`). Point a test build at it with the environment variable
 `ZDEN_SERVER=http://127.0.0.1:8080`.
+
+## Player accounts (optional)
+Set `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_KEY` in Render > Environment and every
+player must be signed in; the server then uses the username from their account (see `supabase.sql`
+and the game's `docs/ACCOUNTS.md`). Unset, names come from the game as before.
+`GET /accounts` tells you which mode is on.

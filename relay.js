@@ -14,6 +14,36 @@ const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I/O look-alikes issues for the 2
 const rooms = new Map(); // code -> room
 let nextConn = 1;
 
+// ---- player accounts (optional) ----
+// When these three environment variables are set (Render > Environment), every player must be
+// signed in and the server uses the username from their account - a modified game cannot pretend
+// to be someone else. Leave them unset and names are taken from the game as before.
+const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SB_ANON = process.env.SUPABASE_ANON_KEY || '';
+const SB_SERVICE = process.env.SUPABASE_SERVICE_KEY || '';
+const accountsOn = !!(SB_URL && SB_ANON && SB_SERVICE);
+const nameCache = new Map(); // token -> { name, t }
+const NAME_CACHE_MS = 5 * 60 * 1000;
+
+// Resolves to the account's username, '' when signed in but no username yet, null when not signed in.
+async function verifyName(token) {
+  if (!token || token.length > 4096) return null;
+  const c = nameCache.get(token);
+  if (c && Date.now() - c.t < NAME_CACHE_MS) return c.name;
+  const ur = await fetch(SB_URL + '/auth/v1/user', { headers: { apikey: SB_ANON, Authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(8000) });
+  if (!ur.ok) return null;
+  const user = await ur.json();
+  if (!user || !user.id) return null;
+  const pr = await fetch(SB_URL + '/rest/v1/profiles?select=username&id=eq.' + encodeURIComponent(user.id),
+    { headers: { apikey: SB_SERVICE, Authorization: 'Bearer ' + SB_SERVICE }, signal: AbortSignal.timeout(8000) });
+  if (!pr.ok) return null;
+  const rows = await pr.json();
+  const name = (Array.isArray(rows) && rows[0] && rows[0].username) ? cleanName(rows[0].username) : '';
+  if (nameCache.size > 5000) nameCache.clear();
+  nameCache.set(token, { name, t: Date.now() });
+  return name;
+}
+
 function newCode() {
   for (let tries = 0; tries < 50; tries++) {
     let c = '';
@@ -34,7 +64,9 @@ const server = http.createServer((req, res) => {
   const ver = parseInt(u.searchParams.get('ver') || '0', 10) || 0;
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'application/json');
-  if (u.pathname === '/games') {
+  if (u.pathname === '/accounts') {
+    res.end(JSON.stringify({ accounts: accountsOn }));
+  } else if (u.pathname === '/games') {
     const list = [];
     for (const r of rooms.values()) if (listable(r, ver)) list.push({ code: r.code, name: r.name, count: count(r), max: MAX_PLAYERS });
     list.sort((a, b) => b.count - a.count);
@@ -121,7 +153,7 @@ server.on('upgrade', (req, socket) => {
   const ws = new Sock(socket);
   clients.add(ws);
   socket.on('close', () => clients.delete(ws));
-  onConnection(ws, req);
+  onConnection(ws, req).catch(() => { try { ws.close(4005, 'server error'); } catch (e) {} });
 });
 
 function closeRoom(room, reason) {
@@ -130,7 +162,7 @@ function closeRoom(room, reason) {
   room.peers.clear();
 }
 
-function onConnection(ws, req) {
+async function onConnection(ws, req) {
   const u = new URL(req.url, 'http://x');
   const role = u.searchParams.get('role');
   const ver = parseInt(u.searchParams.get('ver') || '0', 10) || 0;
@@ -141,6 +173,15 @@ function onConnection(ws, req) {
 
   const fail = (msg) => { sendJson(ws, { t: 'error', msg }); setTimeout(() => ws.close(4001, msg), 150); };
 
+  // accounts on: the username comes from the player's account, never from the game
+  let verified = null;
+  if (accountsOn) {
+    try { verified = await verifyName(u.searchParams.get('token')); } catch (e) { verified = null; }
+    if (ws.readyState !== 1) return;
+    if (verified === null) return fail('Sign in to play online (main menu > Settings > Account).');
+    if (verified === '') return fail('Pick a username first (main menu > Settings > Account).');
+  }
+
   if (role === 'host') {
     let mine = 0;
     for (const r of rooms.values()) if (r.ip === ip) mine++;
@@ -148,7 +189,7 @@ function onConnection(ws, req) {
     if (rooms.size >= MAX_ROOMS) return fail('The server is full right now. Try again soon.');
     const code = newCode();
     if (!code) return fail('Could not create a game. Try again.');
-    room = { code, host: ws, peers: new Map(), name: cleanName(u.searchParams.get('name')), ver, public: u.searchParams.get('public') === '1', started: false, created: Date.now(), nextId: 2, ip };
+    room = { code, host: ws, peers: new Map(), name: verified || cleanName(u.searchParams.get('name')), ver, public: u.searchParams.get('public') === '1', started: false, created: Date.now(), nextId: 2, ip };
     rooms.set(code, room);
     myId = 1;
     sendJson(ws, { t: 'hosted', code });
@@ -162,7 +203,7 @@ function onConnection(ws, req) {
     myId = room.nextId++;
     room.peers.set(myId, ws);
     sendJson(ws, { t: 'joined', id: myId });
-    sendJson(room.host, { t: 'peer', id: myId, on: 1 });
+    sendJson(room.host, verified ? { t: 'peer', id: myId, on: 1, name: verified } : { t: 'peer', id: myId, on: 1 });
   } else {
     return ws.close(4002, 'bad request');
   }
