@@ -34,8 +34,9 @@ async function verifyName(token) {
   if (!ur.ok) return null;
   const user = await ur.json();
   if (!user || !user.id) return null;
+  if (!/^[0-9a-f-]{36}$/i.test(user.id)) return null;
   const pr = await fetch(SB_URL + '/rest/v1/profiles?select=username&id=eq.' + encodeURIComponent(user.id),
-    { headers: { apikey: SB_SERVICE, Authorization: 'Bearer ' + SB_SERVICE }, signal: AbortSignal.timeout(8000) });
+    { headers: SB_SERVICE.startsWith('sb_') ? { apikey: SB_SERVICE } : { apikey: SB_SERVICE, Authorization: 'Bearer ' + SB_SERVICE }, signal: AbortSignal.timeout(8000) });
   if (!pr.ok) return null;
   const rows = await pr.json();
   const name = (Array.isArray(rows) && rows[0] && rows[0].username) ? cleanName(rows[0].username) : '';
