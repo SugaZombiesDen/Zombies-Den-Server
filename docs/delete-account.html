@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zombies Den – Delete Account</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="brand">Zombies Den</div>
+  <h1>Delete your account</h1>
+  <div class="muted">For the Android game Zombies Den by Suga</div>
+</header>
+
+<p>This permanently deletes your Zombies Den online account: your <b>email address</b>, your <b>username</b> and your <b>account ID</b>. It happens right away and cannot be undone. Your username becomes free for other players.</p>
+<p class="muted">Game progress (rank, unlocks, camos, settings) is stored only on your phone, not on our servers. To remove it, uninstall the game or clear its data in Android settings.</p>
+
+<div class="card">
+  <div id="step1">
+    <label for="email">Email address on your account</label>
+    <input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+    <button id="send">Send me a code</button>
+  </div>
+
+  <div id="step2" class="hidden">
+    <p>We emailed a code to <b id="shownEmail"></b>. Type it below to confirm it's you.</p>
+    <label for="code">Code from the email</label>
+    <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" placeholder="12345678">
+    <button id="del">Permanently delete my account</button>
+    <button id="back" class="ghost">Use a different email</button>
+  </div>
+
+  <div id="done" class="hidden">
+    <p class="good"><b>Your account has been deleted.</b></p>
+    <p>If the game is still signed in on your phone, it will sign out by itself.</p>
+  </div>
+
+  <div id="msg" class="msg" role="status"></div>
+</div>
+
+<h2>Other ways</h2>
+<ul>
+  <li><b>In the game:</b> Settings &gt; Gameplay &gt; Online account &gt; <b>DELETE ACCOUNT</b>.</li>
+  <li><b>By email:</b> write to <a href="mailto:tvshowsyt2023@gmail.com?subject=Delete%20my%20Zombies%20Den%20account">tvshowsyt2023@gmail.com</a> from the email on your account. We delete it within 30 days.</li>
+</ul>
+
+<footer class="muted"><a href="privacy.html">Privacy Policy</a></footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
+<script>
+const SUPABASE_URL = "https://vqnsgrnlhayvsnisxizm.supabase.co";
+const SUPABASE_KEY = "sb_publishable_kkSqfAumOAr4Py8oH28h_g_WBEGdnjp";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+const $ = (id) => document.getElementById(id);
+let email = "";
+function say(t, cls) { $("msg").textContent = t; $("msg").className = "msg " + (cls || ""); }
+function show(id) { for (const s of ["step1", "step2", "done"]) $(s).classList.toggle("hidden", s !== id); }
+
+$("send").onclick = async () => {
+  email = $("email").value.trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return say("That doesn't look like an email address.", "err");
+  $("send").disabled = true; say("Sending…");
+  const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+  $("send").disabled = false;
+  if (error) {
+    const m = (error.message || "").toLowerCase();
+    if (m.includes("signups not allowed") || m.includes("not found")) return say("There's no Zombies Den account with that email.", "err");
+    if (m.includes("rate")) return say("Too many codes sent. Wait a minute and try again.", "err");
+    return say("Couldn't send the code: " + error.message, "err");
+  }
+  $("shownEmail").textContent = email; show("step2"); say("");
+};
+
+$("back").onclick = () => { show("step1"); say(""); };
+
+$("del").onclick = async () => {
+  const token = $("code").value.trim();
+  if (token.length < 6) return say("Type the whole code from the email.", "err");
+  if (!confirm("Delete your Zombies Den account forever? This can't be undone.")) return;
+  $("del").disabled = true; say("Deleting…");
+  const v = await sb.auth.verifyOtp({ email, token, type: "email" });
+  if (v.error) { $("del").disabled = false; return say("Wrong or expired code. Check the email, or go back and send a new one.", "err"); }
+  const { error } = await sb.rpc("delete_my_account");
+  $("del").disabled = false;
+  if (error) return say("Couldn't delete the account: " + error.message + " – please email us instead.", "err");
+  await sb.auth.signOut().catch(() => {});
+  show("done"); say("");
+};
+</script>
+</body>
+</html>

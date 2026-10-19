@@ -54,3 +54,24 @@ revoke all on function public.claim_username(text) from public;
 grant execute on function public.claim_username(text) to authenticated;
 grant execute on function public.username_available(text) to anon, authenticated;
 grant execute on function public.username_valid(text) to anon, authenticated;
+
+-- ---------------------------------------------------------------------------------------------
+-- Delete my account (required by Google Play). The signed-in player deletes their own login and,
+-- through "on delete cascade", their username row. Used by the in-game DELETE ACCOUNT button and
+-- by the web page https://sugazombiesden.github.io/zombies-den-server/delete-account.html
+create or replace function public.delete_my_account() returns boolean
+language plpgsql security definer set search_path = public, auth as $$
+declare
+  uid uuid := auth.uid();
+begin
+  if uid is null then
+    raise exception 'not signed in';
+  end if;
+  delete from public.profiles where id = uid;
+  delete from auth.users where id = uid;
+  return true;
+end;
+$$;
+
+revoke all on function public.delete_my_account() from public;
+grant execute on function public.delete_my_account() to authenticated;
