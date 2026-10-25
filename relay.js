@@ -95,6 +95,7 @@ class Sock {
     this.frag = null; this.handlers = {}; this.isAlive = true;
     socket.on('data', (d) => this._data(d));
     socket.on('close', () => this._closed());
+    socket.on('end', () => { try { socket.destroy(); } catch (e) {} }); // client hung up (half-open): finish closing
     socket.on('error', () => { try { socket.destroy(); } catch (e) {} });
     socket.setNoDelay(true);
   }
@@ -143,7 +144,8 @@ class Sock {
     this._write(8, p); this.readyState = 2;
     setTimeout(() => { try { this.socket.destroy(); } catch (e) {} }, 500);
   }
-  terminate() { this.readyState = 3; try { this.socket.destroy(); } catch (e) {} this._closed(); }
+  // must NOT set readyState first: _closed() only fires 'close' (which frees the room) when readyState !== 3
+  terminate() { try { this.socket.destroy(); } catch (e) {} this._closed(); }
 }
 const clients = new Set();
 server.on('upgrade', (req, socket) => {
