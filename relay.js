@@ -9,6 +9,16 @@ const MAX_ROOMS = 400;
 const MAX_ROOMS_PER_IP = 3;
 const MAX_PLAYERS = 4;
 const MAX_FRAME = 65536 + 8;
+// ---- abuse limits (per phone / connection) ----
+const MAX_CONNS = 2000;             // sockets open at once, whole server
+const MAX_CONNS_PER_IP = 40;        // sockets open at once from one address (mobile carriers put many phones behind one address, so generous)
+const CONNECT_BURST = 40;           // new connections one address may open in a burst...
+const CONNECT_PER_MIN = 60;         // ...and per minute after that
+const BYTES_BURST = 1.5e6;          // game traffic per connection: 1.5 MB burst, 250 KB/s sustained
+const BYTES_PER_SEC = 250e3;
+const HTTP_PER_10S = 120;           // /games, /quick, /stats lookups per address per 10 s
+const ROOM_IDLE_MS = 3 * 3600e3;    // a lobby nobody started in 3 hours is closed
+const JSON_MAX = 512;               // a control message (info / kick) is tiny
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I/O look-alikes issues for the 24-letter keypad
 
 const rooms = new Map(); // code -> room
@@ -54,6 +64,23 @@ function newCode() {
   return null;
 }
 const clientIp = (req) => (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '?').toString().split(',')[0].trim();
+// per-address counters: open sockets, a connect-rate bucket and an HTTP bucket (dropped when idle)
+const ips = new Map(); // ip -> { open, cTokens, cT, hTokens, hT, seen }
+function ipRec(ip) {
+  let r = ips.get(ip);
+  if (!r) { r = { open: 0, cTokens: CONNECT_BURST, cT: Date.now(), hTokens: HTTP_PER_10S, hT: Date.now(), seen: Date.now() }; ips.set(ip, r); }
+  r.seen = Date.now();
+  return r;
+}
+function takeToken(r, field, tField, max, perMs) {
+  const now = Date.now();
+  r[field] = Math.min(max, r[field] + (now - r[tField]) * perMs);
+  r[tField] = now;
+  if (r[field] < 1) return false;
+  r[field] -= 1;
+  return true;
+}
+setInterval(() => { const cut = Date.now() - 10 * 60e3; for (const [ip, r] of ips) if (r.open === 0 && r.seen < cut) ips.delete(ip); }, 60e3);
 const cleanName = (n) => (n || 'Survivor').replace(/[^\w '.\-]/g, '').trim().slice(0, 14) || 'Survivor';
 const count = (r) => 1 + r.peers.size;
 const listable = (r, ver) => r.public && !r.started && count(r) < MAX_PLAYERS && (ver === 0 || r.ver === ver);
@@ -65,6 +92,10 @@ const server = http.createServer((req, res) => {
   const ver = parseInt(u.searchParams.get('ver') || '0', 10) || 0;
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'application/json');
+  if (!takeToken(ipRec(clientIp(req)), 'hTokens', 'hT', HTTP_PER_10S, HTTP_PER_10S / 10000)) {
+    res.statusCode = 429;
+    return res.end(JSON.stringify({ error: 'too many requests' }));
+  }
   if (u.pathname === '/accounts') {
     res.end(JSON.stringify({ accounts: accountsOn }));
   } else if (u.pathname === '/games') {
@@ -151,11 +182,20 @@ const clients = new Set();
 server.on('upgrade', (req, socket) => {
   const key = req.headers['sec-websocket-key'];
   if (!key || (req.headers.upgrade || '').toLowerCase() !== 'websocket') { socket.destroy(); return; }
+  // too many sockets, or opening them too fast, from one address: refuse before any work is done
+  const ip = clientIp(req);
+  const rec = ipRec(ip);
+  if (clients.size >= MAX_CONNS || rec.open >= MAX_CONNS_PER_IP || !takeToken(rec, 'cTokens', 'cT', CONNECT_BURST, CONNECT_PER_MIN / 60000)) {
+    try { socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n'); } catch (e) {}
+    socket.destroy();
+    return;
+  }
+  rec.open++;
   const accept = crypto.createHash('sha1').update(key + GUID).digest('base64');
   socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
   const ws = new Sock(socket);
   clients.add(ws);
-  socket.on('close', () => clients.delete(ws));
+  socket.on('close', () => { clients.delete(ws); rec.open = Math.max(0, rec.open - 1); });
   onConnection(ws, req).catch(() => { try { ws.close(4005, 'server error'); } catch (e) {} });
 });
 
@@ -172,6 +212,7 @@ async function onConnection(ws, req) {
   const ip = clientIp(req);
   ws.isAlive = true;
   ws.tokens = 600; ws.tokenT = Date.now();
+  ws.bytes = BYTES_BURST; ws.bytesT = Date.now();
   let room = null, myId = 0;
 
   const fail = (msg) => { sendJson(ws, { t: 'error', msg }); setTimeout(() => ws.close(4001, msg), 150); };
@@ -218,7 +259,12 @@ async function onConnection(ws, req) {
     ws.tokens = Math.min(600, ws.tokens + (now - ws.tokenT) * 0.3);
     ws.tokenT = now;
     if (--ws.tokens < 0) return ws.close(4003, 'too fast');
+    // and a byte budget, so 300 big frames a second is not a way round the message limit
+    ws.bytes = Math.min(BYTES_BURST, ws.bytes + (now - ws.bytesT) * (BYTES_PER_SEC / 1000));
+    ws.bytesT = now;
+    if ((ws.bytes -= data.length) < 0) return ws.close(4003, 'too much data');
     if (!isBinary) {
+      if (data.length > JSON_MAX) return ws.close(4003, 'bad control message');
       let m; try { m = JSON.parse(data.toString()); } catch (e) { return; }
       if (isHost && m.t === 'info') { room.started = !!m.started; if (typeof m.public === 'boolean') room.public = m.public; }
       else if (isHost && m.t === 'kick') { const p = room.peers.get(m.id | 0); if (p) p.close(4004, 'removed by host'); }
@@ -248,6 +294,12 @@ async function onConnection(ws, req) {
     }
   });
 }
+
+// lobbies that never start are closed after a while (a lost phone cannot hold a code or a room slot forever)
+setInterval(() => {
+  const cut = Date.now() - ROOM_IDLE_MS;
+  for (const r of [...rooms.values()]) if (!r.started && r.created < cut) { try { r.host.close(4006, 'This lobby sat idle too long.'); } catch (e) {} closeRoom(r, 'This lobby sat idle too long.'); }
+}, 60e3);
 
 // drop dead connections (phones that vanish without saying goodbye)
 setInterval(() => {
